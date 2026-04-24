@@ -12,9 +12,12 @@
 #include "patch_manager_dialog.h"
 #include "persistent_settings.h"
 #include "config_database.h"
+#include "config_checker.h"
 
 #include "Utilities/File.h"
 #include "Emu/system_utils.hpp"
+#include "Loader/ISO.h"
+#include "Loader/iso_validation.h"
 
 #include "QApplication"
 #include "QClipboard"
@@ -167,6 +170,26 @@ void game_list_context_menu::show_single_selection_context_menu(const game_info&
 	QAction* pad_configure = addAction(gameinfo->has_custom_pad_config
 		? tr("&Change Custom Gamepad Configuration")
 		: tr("&Create Custom Gamepad Configuration"));
+
+	QAction* compare_config = addAction(tr("&Compare Configurations"));
+	connect(compare_config, &QAction::triggered, this, [this, serial]()
+	{
+		std::string db_config;
+		if (config_database* db = m_game_list_frame->GetConfigDatabase(); db->has_config(serial))
+		{
+			if (const std::optional<std::string> config = db->get_config(serial))
+			{
+				db_config = *config;
+			}
+			else
+			{
+				game_list_log.error("No database config found for '%s'", serial);
+			}
+		}
+		config_checker* dlg = new config_checker(m_game_list_frame, QString::fromStdString(serial), config_checker::checker_mode::gamelist, db_config);
+		dlg->open();
+	});
+
 	QAction* configure_patches = addAction(tr("&Manage Game Patches"));
 
 	addSeparator();
@@ -578,6 +601,42 @@ void game_list_context_menu::show_single_selection_context_menu(const game_info&
 	QAction* copy_serial = info_menu->addAction(tr("&Copy Serial"));
 
 	addSeparator();
+
+	// Check integrity
+	if (QString::fromStdString(current_game.category) == cat::cat_disc_game)
+	{
+		std::string key_path;
+		const iso_type_status iso_type = iso_file_decryption::check_type(current_game.path, key_path);
+
+		// If it's an ISO file (e.g. even a decrypted ISO), always provide the entry on the context menu but disable
+		// it if the ISO does not support integrity check (e.g. non Redump ISO) or no integrity DB is found.
+		// That is to highlight a Redump ISO from a non Redump ISO
+		if (iso_type != iso_type_status::NOT_ISO)
+		{
+			const iso_integrity_status iso_integrity = iso_file_validation::check_integrity(current_game.path, "");
+
+			QAction* check_integrity = addAction(tr("&Check ISO Integrity"));
+
+			// If it's a Redump ISO and the integrity DB exists
+			if (iso_type == iso_type_status::REDUMP_ISO && iso_integrity != iso_integrity_status::ERROR_OPENING_DB)
+			{
+				connect(check_integrity, &QAction::triggered, this, [this, gameinfo]()
+				{
+					m_game_list_actions->ShowGameIntegrityDialog(gameinfo);
+				});
+			}
+			else
+			{
+				check_integrity->setEnabled(false);
+			}
+
+			QAction* download_integrity = addAction(tr("&Download Integrity Database"));
+			connect(download_integrity, &QAction::triggered, m_game_list_frame, [this]
+			{
+				ensure(m_game_list_frame->GetIsoIntegrity())->download();
+			});
+		}
+	}
 
 	QAction* check_compat = addAction(tr("&Check Game Compatibility"));
 	QAction* download_compat = addAction(tr("&Download Compatibility Database"));
